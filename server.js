@@ -420,6 +420,23 @@ function formatTime(ms) {
   return `${min}m ${s}s`;
 }
 
+function isRetryableError(err) {
+  if (err.response) {
+    const status = err.response.status;
+    if (status === 429) return true;
+    if (status >= 500 && status <= 504) return true;
+  }
+  const code = err.code || (err.message || '');
+  return code === 'ECONNRESET'
+    || code === 'ETIMEDOUT'
+    || code === 'ECONNABORTED'
+    || code === 'ERR_SOCKET_CONNECTION_TIMEOUT'
+    || (typeof code === 'string' && code.includes('ECONNRESET'))
+    || (typeof code === 'string' && code.includes('ETIMEDOUT'))
+    || (typeof code === 'string' && code.includes('ECONNABORTED'))
+    || (typeof err.message === 'string' && err.message.includes('socket hang up'));
+}
+
 async function fetchWithRetry(fromDate, toDate, page) {
   for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES.length; attempt++) {
     if (abortController && abortController.aborted) {
@@ -450,6 +467,18 @@ async function fetchWithRetry(fromDate, toDate, page) {
         continue;
       }
 
+      const isServerError = isRetryableError(err);
+      if (isServerError && !isRateLimit && attempt < RATE_LIMIT_RETRIES.length) {
+        const status = err.response ? err.response.status : err.code || 'network';
+        let waitMs = retryAfter ? retryAfter * 1000 : RATE_LIMIT_RETRIES[attempt];
+        if (currentJob) {
+          currentJob.lastError = `Temporary Shiprocket error ${status}. Retry ${attempt + 1}/${RATE_LIMIT_RETRIES.length} after ${formatTime(waitMs)}`;
+          saveJob(currentJob);
+        }
+        await sleep(waitMs);
+        continue;
+      }
+
       if (err.response && err.response.status === 401) {
         authToken = null;
         try {
@@ -468,7 +497,7 @@ async function fetchWithRetry(fromDate, toDate, page) {
       throw err;
     }
   }
-  throw new Error(`Failed after ${RATE_LIMIT_RETRIES.length} retries due to rate limit`);
+  throw new Error(`Failed after ${RATE_LIMIT_RETRIES.length} retries`);
 }
 
 function sleep(ms) {
@@ -558,7 +587,7 @@ async function runJob(days) {
             hasMore = false;
           } else {
             page++;
-            await sleep(1000);
+            await sleep(1500);
           }
         }
       }
@@ -569,7 +598,7 @@ async function runJob(days) {
       saveJob(currentJob);
       saveMaster(master);
 
-      await sleep(3000);
+      await sleep(5000);
     }
 
     const dateStr = formatDate(new Date());
