@@ -1,0 +1,16 @@
+{
+  "name": "shiprocket-local-fetcher",
+  "version": "1.0.0",
+  "description": "Local Node.js server to fetch Shiprocket order/shipment data and export as CSV",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
