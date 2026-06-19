@@ -189,7 +189,7 @@ function flattenOrder(order) {
     'Shiprocket Unique Key': buildUniqueKey(order),
     'Shiprocket Order ID': getShiprocketOrderId(order),
     'Channel Order ID': getChannelOrderId(order),
-    'Order Date': sanitizeDate(firstNonEmpty(order.order_date, order.orderDate, order.created_at, order.order_datetime)),
+    'Order Date': sanitizeDate(firstNonEmpty(order.created_at, order.createdAt, order.order_date, order.orderDate, order.order_datetime)),
     'Created At': sanitizeDate(firstNonEmpty(order.created_at, order.createdAt, order.date_created)),
     'Customer Name': firstNonEmpty(
       order.customer_name,
@@ -522,27 +522,50 @@ async function runJob(days) {
     : days === 28 ? 'last_28_days'
     : 'last_90_days';
 
-  const chunks = generateChunks(days);
+  const todayStr = formatDate(today);
+  const fromStr = formatDate(fromDate);
 
   currentJob = {
     status: 'running',
     rangeLabel,
-    totalChunks: chunks.length,
-    completedChunks: 0,
-    remainingChunks: chunks.length,
-    currentChunk: null,
+    totalPages: 0,
+    completedPages: 0,
+    remainingPages: 0,
+    currentPage: null,
     totalFetchedRows: 0,
     totalUniqueRows: 0,
     lastError: null,
     outputFile: 'output/shiprocket_orders_latest.csv',
+    note: 'Shiprocket API does not filter by date. Fetching all available orders.',
   };
 
   saveJob(currentJob);
 
   const master = loadMaster();
+  let page = 1;
+  let totalPages = 0;
 
   try {
-    for (const chunk of chunks) {
+    let data;
+    try {
+      data = await fetchWithRetry(fromStr, todayStr, page);
+    } catch (err) {
+      console.error(`Page ${page} failed: ${err.message}`);
+      currentJob.lastError = `Page ${page}: ${err.message}`;
+      currentJob.status = 'failed';
+      saveJob(currentJob);
+      currentJob = null;
+      return;
+    }
+
+    totalPages = data?.meta?.pagination?.total_pages || 1;
+    currentJob.totalPages = totalPages;
+    currentJob.remainingPages = totalPages;
+    saveJob(currentJob);
+
+    let hasMore = true;
+
+    while (hasMore) {
       if (abortController && abortController.aborted) {
         currentJob.status = 'aborted';
         currentJob.lastError = 'Job was aborted by user';
@@ -551,61 +574,46 @@ async function runJob(days) {
         return;
       }
 
-      let page = 1;
-      let hasMore = true;
+      currentJob.currentPage = page;
+      saveJob(currentJob);
 
-      while (hasMore) {
-        currentJob.currentChunk = {
-          index: chunk.index,
-          from: chunk.from,
-          to: chunk.to,
-          page,
-        };
-        saveJob(currentJob);
-
-        let data;
+      if (page > 1) {
         try {
-          data = await fetchWithRetry(chunk.from, chunk.to, page);
+          data = await fetchWithRetry(fromStr, todayStr, page);
         } catch (err) {
-          console.error(`Chunk ${chunk.index} page ${page} failed: ${err.message}`);
-          currentJob.lastError = `Chunk ${chunk.index} page ${page}: ${err.message}`;
+          console.error(`Page ${page} failed: ${err.message}`);
+          currentJob.lastError = `Page ${page}: ${err.message}`;
           currentJob.status = 'failed';
           saveJob(currentJob);
           currentJob = null;
           return;
         }
-
-        const orders = extractOrders(data);
-        const orderList = Array.isArray(orders) ? orders : [];
-
-        if (orderList.length === 0) {
-          hasMore = false;
-        } else {
-          for (const order of orderList) {
-            const key = buildUniqueKey(order);
-            const flattened = flattenOrder(order);
-            master[key] = flattened;
-          }
-
-          currentJob.totalUniqueRows = Object.keys(master).length;
-          saveJob(currentJob);
-
-          if (!shouldFetchNextPage(data, orderList, page)) {
-            hasMore = false;
-          } else {
-            page++;
-            await sleep(1500);
-          }
-        }
       }
 
-      currentJob.completedChunks++;
-      currentJob.remainingChunks = currentJob.totalChunks - currentJob.completedChunks;
-      currentJob.currentChunk = null;
+      const orders = extractOrders(data);
+      const orderList = Array.isArray(orders) ? orders : [];
+
+      if (orderList.length > 0) {
+        for (const order of orderList) {
+          const key = buildUniqueKey(order);
+          const flattened = flattenOrder(order);
+          master[key] = flattened;
+        }
+
+        currentJob.totalUniqueRows = Object.keys(master).length;
+      }
+
+      currentJob.completedPages = page;
+      currentJob.remainingPages = totalPages - page;
       saveJob(currentJob);
       saveMaster(master);
 
-      await sleep(5000);
+      if (!shouldFetchNextPage(data, orderList, page)) {
+        hasMore = false;
+      } else {
+        page++;
+        await sleep(1500);
+      }
     }
 
     const dateStr = formatDate(new Date());
@@ -616,12 +624,12 @@ async function runJob(days) {
     await writeCSV(datedCsvPath, master);
 
     currentJob.status = 'completed';
-    currentJob.currentChunk = null;
+    currentJob.currentPage = null;
     currentJob.lastError = null;
     currentJob.outputFile = 'output/shiprocket_orders_latest.csv';
     saveJob(currentJob);
 
-    console.log(`Job completed. ${Object.keys(master).length} unique orders saved.`);
+    console.log(`Job completed. ${Object.keys(master).length} unique orders saved (${totalPages} pages).`);
   } catch (err) {
     console.error(`Job failed: ${err.message}`);
     currentJob.status = 'failed';
@@ -761,18 +769,18 @@ app.get('/', (req, res) => {
   </div>
 
   <div class="card" id="current-chunk-card" style="display:none">
-    <h2>Current Chunk</h2>
+    <h2>Progress</h2>
     <div class="stat-grid">
       <div class="stat">
-        <div class="stat-label">Chunk</div>
+        <div class="stat-label">Page</div>
         <div class="stat-value" id="chunk-index">-</div>
       </div>
       <div class="stat">
-        <div class="stat-label">Date Range</div>
+        <div class="stat-label">Status</div>
         <div class="stat-value" id="chunk-range" style="font-size:0.9rem">-</div>
       </div>
       <div class="stat">
-        <div class="stat-label">Page</div>
+        <div class="stat-label">Fetching Page</div>
         <div class="stat-value" id="chunk-page">-</div>
       </div>
     </div>
@@ -823,9 +831,9 @@ function updateStatusUI(job) {
 
   document.getElementById('stat-range').textContent = (job.rangeLabel || '').replace(/_/g, ' ');
 
-  if (job.totalChunks) {
+  if (job.totalPages) {
     document.getElementById('stat-progress').textContent =
-      job.completedChunks + ' / ' + job.totalChunks + ' chunks';
+      (job.completedPages || 0) + ' / ' + job.totalPages + ' pages';
   } else {
     document.getElementById('stat-progress').textContent = '-';
   }
@@ -836,9 +844,9 @@ function updateStatusUI(job) {
 
   const barContainer = document.getElementById('progress-bar-container');
   const fill = document.getElementById('progress-fill');
-  if (job.totalChunks && job.totalChunks > 0) {
+  if (job.totalPages && job.totalPages > 0) {
     barContainer.style.display = 'block';
-    const pct = Math.round((job.completedChunks / job.totalChunks) * 100);
+    const pct = Math.round(((job.completedPages || 0) / job.totalPages) * 100);
     fill.style.width = pct + '%';
     fill.className = 'progress-fill';
     if (job.status === 'completed') fill.classList.add('completed');
@@ -855,14 +863,14 @@ function updateStatusUI(job) {
     errBox.style.display = 'none';
   }
 
-  const chunkCard = document.getElementById('current-chunk-card');
-  if (job.currentChunk) {
-    chunkCard.style.display = 'block';
-    document.getElementById('chunk-index').textContent = job.currentChunk.index + ' / ' + job.totalChunks;
-    document.getElementById('chunk-range').textContent = job.currentChunk.from + ' to ' + job.currentChunk.to;
-    document.getElementById('chunk-page').textContent = job.currentChunk.page;
+  const pageCard = document.getElementById('current-chunk-card');
+  if (job.currentPage) {
+    pageCard.style.display = 'block';
+    document.getElementById('chunk-index').textContent = job.currentPage + ' / ' + (job.totalPages || '?');
+    document.getElementById('chunk-range').textContent = 'Page ' + job.currentPage;
+    document.getElementById('chunk-page').textContent = job.currentPage;
   } else {
-    chunkCard.style.display = 'none';
+    pageCard.style.display = 'none';
   }
 
   const downloadBtn = document.getElementById('btn-download');
@@ -1003,28 +1011,21 @@ app.get('/chunks', (req, res) => {
   if (![1, 3, 7, 28, 90].includes(days)) {
     return res.status(400).json({ error: 'Invalid days. Allowed: 1, 3, 7, 28, 90' });
   }
-  const chunks = generateChunks(days);
 
   const job = currentJob || loadJob();
-  const result = {
-    days,
-    totalChunks: chunks.length,
-    chunks,
-  };
+  const result = { days };
   if (job && job.status) {
     result.job = {
       status: job.status,
       rangeLabel: job.rangeLabel,
-      totalChunks: job.totalChunks,
-      completedChunks: job.completedChunks,
-      remainingChunks: job.remainingChunks,
+      totalPages: job.totalPages,
+      completedPages: job.completedPages,
+      remainingPages: job.remainingPages,
+      currentPage: job.currentPage,
       totalFetchedRows: job.totalFetchedRows,
       totalUniqueRows: job.totalUniqueRows,
       lastError: job.lastError,
     };
-    if (job.currentChunk) {
-      result.job.currentChunk = job.currentChunk;
-    }
   }
 
   res.json(result);
