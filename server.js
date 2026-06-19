@@ -3,6 +3,7 @@ const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { createObjectCsvWriter } = require('csv-writer');
 
 const app = express();
@@ -88,49 +89,275 @@ function generateChunks(days) {
   return chunks;
 }
 
-function generateKey(order) {
-  if (order.awb_code && order.awb_code !== '') return `awb:${order.awb_code}`;
-  if (order.shipment_id && order.shipment_id !== '') return `shipment:${order.shipment_id}`;
-  if (order.id) return `shiprocket_order:${order.id}`;
-  if (order.order_id && order.order_id !== '') return `channel_order:${order.order_id}`;
-  return `shiprocket_order:${order.id || 'unknown'}`;
+function firstNonEmpty(...values) {
+  for (const v of values) {
+    if (v !== null && v !== undefined && v !== '') return v;
+  }
+  return '';
+}
+
+function getFirstShipment(order) {
+  if (order.shipments && Array.isArray(order.shipments) && order.shipments.length > 0) {
+    return order.shipments[0];
+  }
+  if (order.shipment && typeof order.shipment === 'object') {
+    return order.shipment;
+  }
+  return null;
+}
+
+function getAwbCode(order) {
+  const shipment = getFirstShipment(order);
+  return firstNonEmpty(
+    order.awb_code,
+    order.awb,
+    order.awb_number,
+    order.tracking_number,
+    order.shipment_awb,
+    shipment?.awb,
+    shipment?.awb_code,
+    shipment?.awb_number,
+    shipment?.tracking_number,
+    order.awb_data?.awb,
+    order.awb_data?.awb_code,
+    order.courier_data?.awb_code,
+    order.shipment_awb_code,
+    order.tracking_number,
+  );
+}
+
+function getShipmentId(order) {
+  const shipment = getFirstShipment(order);
+  return firstNonEmpty(
+    order.shipment_id,
+    order.shipmentId,
+    shipment?.id,
+    shipment?.shipment_id,
+  );
+}
+
+function getShiprocketOrderId(order) {
+  return firstNonEmpty(
+    order.id,
+    order.shiprocket_order_id,
+    order.order_id,
+  );
+}
+
+function getChannelOrderId(order) {
+  return firstNonEmpty(
+    order.channel_order_id,
+    order.channel_order,
+    order.external_order_id,
+    order.order_number,
+    order.order_id,
+    order.channel_order_no,
+  );
+}
+
+function buildUniqueKey(order) {
+  const awb = getAwbCode(order);
+  if (awb) return `awb:${awb}`;
+
+  const shipmentId = getShipmentId(order);
+  if (shipmentId) return `shipment:${shipmentId}`;
+
+  const srOrderId = getShiprocketOrderId(order);
+  if (srOrderId) return `shiprocket_order:${srOrderId}`;
+
+  const channelOrderId = getChannelOrderId(order);
+  if (channelOrderId) return `channel_order:${channelOrderId}`;
+
+  const hash = crypto.createHash('sha256').update(JSON.stringify(order)).digest('hex');
+  return `unknown:${hash}`;
 }
 
 function flattenOrder(order) {
-  const products = order.products || [];
-  const productsStr = Array.isArray(products)
-    ? products.map(p => `${p.name || ''} x${p.quantity || 1}`).join('; ')
-    : '';
+  const shipment = getFirstShipment(order);
+
+  const products = extractProducts(order);
+  const productsStr = products.map(p => {
+    const name = p.name || p.product_name || p.product || p.sku || '';
+    const qty = p.quantity || p.qty || 1;
+    const sku = p.sku || p.product_sku || '';
+    let part = `${name} x${qty}`;
+    if (sku) part += ` | SKU: ${sku}`;
+    return part;
+  }).join('; ');
 
   return {
-    'Shiprocket Unique Key': generateKey(order),
-    'Shiprocket Order ID': order.id || '',
-    'Channel Order ID': order.order_id || '',
-    'Order Date': order.order_date || '',
-    'Created At': order.created_at || '',
-    'Customer Name': order.billing_customer_name || '',
-    'Customer Email': order.billing_email || '',
-    'Customer Phone': order.billing_phone || '',
-    'Pickup Location': order.pickup_location || '',
-    'Payment Status': order.payment_status || '',
-    'Payment Method': order.payment_method || '',
-    'Order Total': order.total !== undefined ? order.total : (order.order_total || ''),
-    'Tax': order.tax || '',
-    'Order Status': order.order_status || '',
-    'Order Status Code': order.order_status_code !== undefined ? order.order_status_code : '',
-    'Shipment ID': order.shipment_id || '',
-    'AWB Code': order.awb_code || '',
-    'Courier': order.courier_name || '',
-    'Current Shipment Status': order.current_status || '',
-    'Current Shipment Status ID': order.current_status_id !== undefined ? order.current_status_id : '',
-    'Current Shipment Status Time': order.current_status_time || '',
-    'Tracking URL': order.tracking_url || '',
-    'Expected Delivery Date': order.expected_delivery_date || '',
-    'Delivered Date': order.delivered_date || '',
+    'Shiprocket Unique Key': buildUniqueKey(order),
+    'Shiprocket Order ID': getShiprocketOrderId(order),
+    'Channel Order ID': getChannelOrderId(order),
+    'Order Date': firstNonEmpty(order.order_date, order.orderDate, order.created_at, order.order_datetime),
+    'Created At': firstNonEmpty(order.created_at, order.createdAt, order.date_created),
+    'Customer Name': firstNonEmpty(
+      order.customer_name,
+      order.billing_customer_name,
+      order.billing_name,
+      order.consignee_name,
+      order.customer?.name,
+      order.billing_address?.name,
+      order.shipping_address?.name,
+    ),
+    'Customer Email': firstNonEmpty(
+      order.customer_email,
+      order.billing_email,
+      order.email,
+      order.customer?.email,
+    ),
+    'Customer Phone': firstNonEmpty(
+      order.customer_phone,
+      order.billing_phone,
+      order.phone,
+      order.customer?.phone,
+      order.shipping_address?.phone,
+    ),
+    'Pickup Location': firstNonEmpty(
+      order.pickup_location,
+      order.pickup_location_name,
+      order.pickup_address,
+      order.pickup?.location,
+      order.pickup?.address,
+    ),
+    'Payment Status': firstNonEmpty(
+      order.payment_status,
+      order.paymentStatus,
+      order.payment?.status,
+    ),
+    'Payment Method': firstNonEmpty(
+      order.payment_method,
+      order.paymentMethod,
+      order.payment?.method,
+    ),
+    'Order Total': firstNonEmpty(
+      order.total,
+      order.order_total,
+      order.total_amount,
+      order.grand_total,
+      order.amount,
+    ),
+    'Tax': firstNonEmpty(
+      order.tax,
+      order.total_tax,
+      order.tax_amount,
+    ),
+    'Order Status': firstNonEmpty(
+      order.order_status,
+      order.status,
+      order.orderStatus,
+    ),
+    'Order Status Code': firstNonEmpty(
+      order.order_status_code,
+      order.status_code,
+      order.orderStatusCode,
+    ),
+    'Shipment ID': getShipmentId(order),
+    'AWB Code': getAwbCode(order),
+    'Courier': firstNonEmpty(
+      order.courier_name,
+      order.courier_company_name,
+      order.courier,
+      shipment?.courier,
+      shipment?.courier_name,
+      shipment?.courier_company_name,
+    ),
+    'Current Shipment Status': firstNonEmpty(
+      order.current_status,
+      order.shipment_status,
+      order.status,
+      shipment?.status,
+      shipment?.current_status,
+    ),
+    'Current Shipment Status ID': firstNonEmpty(
+      order.current_status_id,
+      shipment?.current_status_id,
+    ),
+    'Current Shipment Status Time': firstNonEmpty(
+      order.current_status_time,
+      shipment?.current_status_time,
+      shipment?.status_time,
+    ),
+    'Tracking URL': firstNonEmpty(
+      order.tracking_url,
+      order.track_url,
+      order.trackingUrl,
+      shipment?.tracking_url,
+      shipment?.track_url,
+    ),
+    'Expected Delivery Date': firstNonEmpty(
+      order.expected_delivery_date,
+      order.expectedDeliveryDate,
+      order.estimated_delivery_date,
+      shipment?.expected_delivery_date,
+    ),
+    'Delivered Date': firstNonEmpty(
+      order.delivered_date,
+      order.deliveredDate,
+      order.delivery_date,
+      shipment?.delivered_date,
+    ),
     'Products': productsStr,
     'Last Local API Sync At': new Date().toISOString(),
     'Raw Shiprocket JSON': JSON.stringify(order),
   };
+}
+
+function extractProducts(order) {
+  if (order.products && Array.isArray(order.products)) return order.products;
+  if (order.order_items && Array.isArray(order.order_items)) return order.order_items;
+  if (order.items && Array.isArray(order.items)) return order.items;
+  if (order.line_items && Array.isArray(order.line_items)) return order.line_items;
+  return [];
+}
+
+function extractOrders(apiResponse) {
+  if (apiResponse === null || apiResponse === undefined) return [];
+
+  if (Array.isArray(apiResponse)) return apiResponse;
+
+  if (apiResponse.data && Array.isArray(apiResponse.data)) {
+    if (apiResponse.data.length > 0 && typeof apiResponse.data[0] === 'object' && apiResponse.data[0] !== null) {
+      return apiResponse.data;
+    }
+  }
+
+  if (apiResponse.data && apiResponse.data.data && Array.isArray(apiResponse.data.data)) {
+    return apiResponse.data.data;
+  }
+
+  if (apiResponse.orders && Array.isArray(apiResponse.orders)) return apiResponse.orders;
+  if (apiResponse.items && Array.isArray(apiResponse.items)) return apiResponse.items;
+  if (apiResponse.shipments && Array.isArray(apiResponse.shipments)) return apiResponse.shipments;
+  if (apiResponse.data && apiResponse.data.shipments && Array.isArray(apiResponse.data.shipments)) {
+    return apiResponse.data.shipments;
+  }
+
+  return [];
+}
+
+function shouldFetchNextPage(apiResponse, rows, currentPage) {
+  if (rows.length === 0) return false;
+
+  if (rows.length < PAGE_LIMIT) return false;
+
+  if (apiResponse.meta?.pagination?.total_pages) {
+    return currentPage < apiResponse.meta.pagination.total_pages;
+  }
+  if (apiResponse.meta?.pagination?.current_page !== undefined) {
+    return currentPage < apiResponse.meta.pagination.total_pages;
+  }
+  if (apiResponse.data?.current_page !== undefined && apiResponse.data?.last_page !== undefined) {
+    return currentPage < apiResponse.data.last_page;
+  }
+  if (apiResponse.current_page !== undefined && apiResponse.last_page !== undefined) {
+    return currentPage < apiResponse.last_page;
+  }
+  if (apiResponse.links?.next || apiResponse.next_page_url) {
+    return true;
+  }
+
+  return rows.length >= PAGE_LIMIT;
 }
 
 async function shiprocketLogin() {
@@ -202,8 +429,9 @@ async function fetchWithRetry(fromDate, toDate, page) {
     try {
       const data = await fetchOrdersPage(fromDate, toDate, page);
 
+      const orders = extractOrders(data);
       if (currentJob) {
-        currentJob.totalFetchedRows = (currentJob.totalFetchedRows || 0) + (data.data ? data.data.length : 0);
+        currentJob.totalFetchedRows = (currentJob.totalFetchedRows || 0) + orders.length;
       }
 
       return data;
@@ -227,8 +455,9 @@ async function fetchWithRetry(fromDate, toDate, page) {
         try {
           await shiprocketLogin();
           const data = await fetchOrdersPage(fromDate, toDate, page);
+          const orders = extractOrders(data);
           if (currentJob) {
-            currentJob.totalFetchedRows = (currentJob.totalFetchedRows || 0) + (data.data ? data.data.length : 0);
+            currentJob.totalFetchedRows = (currentJob.totalFetchedRows || 0) + orders.length;
           }
           return data;
         } catch (loginErr) {
@@ -269,7 +498,7 @@ async function runJob(days) {
     totalFetchedRows: 0,
     totalUniqueRows: 0,
     lastError: null,
-    outputFile: `output/shiprocket_orders_latest.csv`,
+    outputFile: 'output/shiprocket_orders_latest.csv',
   };
 
   saveJob(currentJob);
@@ -310,14 +539,14 @@ async function runJob(days) {
           return;
         }
 
-        const orders = data.data || data.orders || data || [];
+        const orders = extractOrders(data);
         const orderList = Array.isArray(orders) ? orders : [];
 
         if (orderList.length === 0) {
           hasMore = false;
         } else {
           for (const order of orderList) {
-            const key = generateKey(order);
+            const key = buildUniqueKey(order);
             const flattened = flattenOrder(order);
             master[key] = flattened;
           }
@@ -325,7 +554,7 @@ async function runJob(days) {
           currentJob.totalUniqueRows = Object.keys(master).length;
           saveJob(currentJob);
 
-          if (orderList.length < PAGE_LIMIT) {
+          if (!shouldFetchNextPage(data, orderList, page)) {
             hasMore = false;
           } else {
             page++;
@@ -739,7 +968,30 @@ app.get('/chunks', (req, res) => {
     return res.status(400).json({ error: 'Invalid days. Allowed: 1, 3, 7, 28, 90' });
   }
   const chunks = generateChunks(days);
-  res.json({ days, totalChunks: chunks.length, chunks });
+
+  const job = currentJob || loadJob();
+  const result = {
+    days,
+    totalChunks: chunks.length,
+    chunks,
+  };
+  if (job && job.status) {
+    result.job = {
+      status: job.status,
+      rangeLabel: job.rangeLabel,
+      totalChunks: job.totalChunks,
+      completedChunks: job.completedChunks,
+      remainingChunks: job.remainingChunks,
+      totalFetchedRows: job.totalFetchedRows,
+      totalUniqueRows: job.totalUniqueRows,
+      lastError: job.lastError,
+    };
+    if (job.currentChunk) {
+      result.job.currentChunk = job.currentChunk;
+    }
+  }
+
+  res.json(result);
 });
 
 app.post('/start', async (req, res) => {
