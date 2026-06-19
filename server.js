@@ -189,8 +189,8 @@ function flattenOrder(order) {
     'Shiprocket Unique Key': buildUniqueKey(order),
     'Shiprocket Order ID': getShiprocketOrderId(order),
     'Channel Order ID': getChannelOrderId(order),
-    'Order Date': firstNonEmpty(order.order_date, order.orderDate, order.created_at, order.order_datetime),
-    'Created At': firstNonEmpty(order.created_at, order.createdAt, order.date_created),
+    'Order Date': sanitizeDate(firstNonEmpty(order.order_date, order.orderDate, order.created_at, order.order_datetime)),
+    'Created At': sanitizeDate(firstNonEmpty(order.created_at, order.createdAt, order.date_created)),
     'Customer Name': firstNonEmpty(
       order.customer_name,
       order.billing_customer_name,
@@ -273,11 +273,11 @@ function flattenOrder(order) {
       order.current_status_id,
       shipment?.current_status_id,
     ),
-    'Current Shipment Status Time': firstNonEmpty(
+    'Current Shipment Status Time': sanitizeDate(firstNonEmpty(
       order.current_status_time,
       shipment?.current_status_time,
       shipment?.status_time,
-    ),
+    )),
     'Tracking URL': firstNonEmpty(
       order.tracking_url,
       order.track_url,
@@ -285,18 +285,18 @@ function flattenOrder(order) {
       shipment?.tracking_url,
       shipment?.track_url,
     ),
-    'Expected Delivery Date': firstNonEmpty(
+    'Expected Delivery Date': sanitizeDate(firstNonEmpty(
       order.expected_delivery_date,
       order.expectedDeliveryDate,
       order.estimated_delivery_date,
       shipment?.expected_delivery_date,
-    ),
-    'Delivered Date': firstNonEmpty(
+    )),
+    'Delivered Date': sanitizeDate(firstNonEmpty(
       order.delivered_date,
       order.deliveredDate,
       order.delivery_date,
       shipment?.delivered_date,
-    ),
+    )),
     'Products': productsStr,
     'Last Local API Sync At': new Date().toISOString(),
     'Raw Shiprocket JSON': JSON.stringify(order),
@@ -358,6 +358,13 @@ function shouldFetchNextPage(apiResponse, rows, currentPage) {
   }
 
   return rows.length >= PAGE_LIMIT;
+}
+
+function sanitizeDate(val) {
+  if (typeof val === 'string' && val.includes(',')) {
+    return val.replace(/,/g, '');
+  }
+  return val;
 }
 
 async function shiprocketLogin() {
