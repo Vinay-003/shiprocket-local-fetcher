@@ -172,135 +172,45 @@ function buildUniqueKey(order) {
   return `unknown:${hash}`;
 }
 
-function flattenOrder(order) {
+function getActivities(order) {
   const shipment = getFirstShipment(order);
+  return firstNonEmpty(
+    order.activities,
+    order.scans,
+    order.shipment_track_activities,
+    shipment?.activities,
+    shipment?.scans,
+    order.shipment?.activities,
+    order.shipment?.scans,
+    null,
+  );
+}
 
+function getScanValue(scan, keys) {
+  for (const key of keys) {
+    const v = scan[key];
+    if (v !== null && v !== undefined && v !== '') return v;
+  }
+  return '';
+}
+
+function stringifyIfObject(val) {
+  if (val === null || val === undefined) return '';
+  if (Array.isArray(val)) return val.join(', ');
+  if (typeof val === 'object') return JSON.stringify(val);
+  return String(val);
+}
+
+function summarizeProducts(order) {
   const products = extractProducts(order);
-  const productsStr = products.map(p => {
+  return products.map(p => {
     const name = p.name || p.product_name || p.product || p.sku || '';
     const qty = p.quantity || p.qty || 1;
-    const sku = p.sku || p.product_sku || '';
+    const sku = p.sku || p.product_sku || p.channel_sku || '';
     let part = `${name} x${qty}`;
     if (sku) part += ` | SKU: ${sku}`;
     return part;
   }).join('; ');
-
-  return {
-    'Shiprocket Unique Key': buildUniqueKey(order),
-    'Shiprocket Order ID': getShiprocketOrderId(order),
-    'Channel Order ID': getChannelOrderId(order),
-    'Order Date': sanitizeDate(firstNonEmpty(order.created_at, order.createdAt, order.order_date, order.orderDate, order.order_datetime)),
-    'Created At': sanitizeDate(firstNonEmpty(order.created_at, order.createdAt, order.date_created)),
-    'Customer Name': firstNonEmpty(
-      order.customer_name,
-      order.billing_customer_name,
-      order.billing_name,
-      order.consignee_name,
-      order.customer?.name,
-      order.billing_address?.name,
-      order.shipping_address?.name,
-    ),
-    'Customer Email': firstNonEmpty(
-      order.customer_email,
-      order.billing_email,
-      order.email,
-      order.customer?.email,
-    ),
-    'Customer Phone': firstNonEmpty(
-      order.customer_phone,
-      order.billing_phone,
-      order.phone,
-      order.customer?.phone,
-      order.shipping_address?.phone,
-    ),
-    'Pickup Location': firstNonEmpty(
-      order.pickup_location,
-      order.pickup_location_name,
-      order.pickup_address,
-      order.pickup?.location,
-      order.pickup?.address,
-    ),
-    'Payment Status': firstNonEmpty(
-      order.payment_status,
-      order.paymentStatus,
-      order.payment?.status,
-    ),
-    'Payment Method': firstNonEmpty(
-      order.payment_method,
-      order.paymentMethod,
-      order.payment?.method,
-    ),
-    'Order Total': firstNonEmpty(
-      order.total,
-      order.order_total,
-      order.total_amount,
-      order.grand_total,
-      order.amount,
-    ),
-    'Tax': firstNonEmpty(
-      order.tax,
-      order.total_tax,
-      order.tax_amount,
-    ),
-    'Order Status': firstNonEmpty(
-      order.order_status,
-      order.status,
-      order.orderStatus,
-    ),
-    'Order Status Code': firstNonEmpty(
-      order.order_status_code,
-      order.status_code,
-      order.orderStatusCode,
-    ),
-    'Shipment ID': getShipmentId(order),
-    'AWB Code': getAwbCode(order),
-    'Courier': firstNonEmpty(
-      order.courier_name,
-      order.courier_company_name,
-      order.courier,
-      shipment?.courier,
-      shipment?.courier_name,
-      shipment?.courier_company_name,
-    ),
-    'Current Shipment Status': firstNonEmpty(
-      order.current_status,
-      order.shipment_status,
-      order.status,
-      shipment?.status,
-      shipment?.current_status,
-    ),
-    'Current Shipment Status ID': firstNonEmpty(
-      order.current_status_id,
-      shipment?.current_status_id,
-    ),
-    'Current Shipment Status Time': sanitizeDate(firstNonEmpty(
-      order.current_status_time,
-      shipment?.current_status_time,
-      shipment?.status_time,
-    )),
-    'Tracking URL': firstNonEmpty(
-      order.tracking_url,
-      order.track_url,
-      order.trackingUrl,
-      shipment?.tracking_url,
-      shipment?.track_url,
-    ),
-    'Expected Delivery Date': sanitizeDate(firstNonEmpty(
-      order.expected_delivery_date,
-      order.expectedDeliveryDate,
-      order.estimated_delivery_date,
-      shipment?.expected_delivery_date,
-    )),
-    'Delivered Date': sanitizeDate(firstNonEmpty(
-      order.delivered_date,
-      order.deliveredDate,
-      order.delivery_date,
-      shipment?.delivered_date,
-    )),
-    'Products': productsStr,
-    'Last Local API Sync At': new Date().toISOString(),
-    'Raw Shiprocket JSON': JSON.stringify(order),
-  };
 }
 
 function extractProducts(order) {
@@ -308,7 +218,208 @@ function extractProducts(order) {
   if (order.order_items && Array.isArray(order.order_items)) return order.order_items;
   if (order.items && Array.isArray(order.items)) return order.items;
   if (order.line_items && Array.isArray(order.line_items)) return order.line_items;
+  if (order.others?.order_items && Array.isArray(order.others.order_items)) return order.others.order_items;
   return [];
+}
+
+function flattenOrder(order) {
+  const shipment = getFirstShipment(order);
+  const activities = getActivities(order);
+  const scans = Array.isArray(activities) ? activities : [];
+
+  function scanFields(prefix, scan) {
+    if (!scan) {
+      return {
+        [prefix + ' Status']: '',
+        [prefix + ' Sr-status-label']: '',
+        [prefix + ' Sr-status']: '',
+        [prefix + ' Location']: '',
+        [prefix + ' Date']: '',
+        [prefix + ' Activity']: '',
+      };
+    }
+    return {
+      [prefix + ' Status']: getScanValue(scan, ['status']),
+      [prefix + ' Sr-status-label']: getScanValue(scan, ['sr-status-label', 'sr_status_label', 'srStatusLabel', 'status_label']),
+      [prefix + ' Sr-status']: getScanValue(scan, ['sr-status', 'sr_status', 'srStatus', 'status_code']),
+      [prefix + ' Location']: getScanValue(scan, ['location', 'scan_location', 'current_location']),
+      [prefix + ' Date']: sanitizeDate(getScanValue(scan, ['date', 'scan_date', 'status_date', 'created_at', 'updated_at'])),
+      [prefix + ' Activity']: getScanValue(scan, ['activity', 'description', 'remarks', 'message']),
+    };
+  }
+
+  const scan0 = scans.length > 0 ? scans[0] : null;
+  const scan1 = scans.length > 1 ? scans[1] : null;
+
+  return {
+    'Shiprocket Unique Key': buildUniqueKey(order),
+    'Sr Order Id': firstNonEmpty(order.id, order.order_id, order.shiprocket_order_id, order.sr_order_id),
+    'Shipment Status Id': firstNonEmpty(
+      order.shipment_status_id,
+      order.current_status_id,
+      order.status_id,
+      order.status_code,
+      shipment?.status_id,
+      shipment?.status_code,
+      shipment?.status,
+    ),
+    'Shipment Status': firstNonEmpty(
+      order.shipment_status,
+      order.current_status,
+      order.status,
+      shipment?.current_status,
+      shipment?.shipment_status,
+      shipment?.status_label,
+      shipment?.status,
+      order.status_code,
+    ),
+    ...scanFields('Scans 1', scan1),
+    ...scanFields('Scans 0', scan0),
+    'Order Id': firstNonEmpty(
+      order.channel_order_id,
+      order.order_number,
+      order.external_order_id,
+      order.channel_order,
+      order.channel_order_no,
+      order.others?.name,
+    ),
+    'Is Return': firstNonEmpty(order.is_return, order.isReturn, order.return_order, order.is_reverse, ''),
+    'Etd': sanitizeDate(firstNonEmpty(
+      order.etd,
+      order.edd,
+      order.expected_delivery_date,
+      order.estimated_delivery_date,
+      order.expectedDeliveryDate,
+      shipment?.etd,
+      shipment?.edd,
+      shipment?.expected_delivery_date,
+      order.others?.etd_date,
+    )),
+    'Current Timestamp': sanitizeDate(firstNonEmpty(
+      order.current_timestamp,
+      order.current_status_time,
+      order.status_date_time,
+      order.updated_at,
+      order.updated_on,
+      shipment?.updated_at,
+      shipment?.status_date_time,
+      shipment?.updated_on,
+    )),
+    'Current Status Id': firstNonEmpty(
+      order.current_status_id,
+      order.shipment_status_id,
+      order.status_id,
+      order.status_code,
+      shipment?.status_id,
+      shipment?.status_code,
+      shipment?.status,
+    ),
+    'Current Status': firstNonEmpty(
+      order.current_status,
+      order.shipment_status,
+      order.status,
+      shipment?.current_status,
+      shipment?.shipment_status,
+      shipment?.status_label,
+      shipment?.status,
+    ),
+    'Courier Name': firstNonEmpty(
+      order.courier_name,
+      order.courier_company_name,
+      order.courier,
+      shipment?.courier,
+      shipment?.sr_courier_name,
+      shipment?.courier_name,
+      shipment?.courier_company_name,
+      order.last_mile_courier_name,
+    ),
+    'Channel Id': firstNonEmpty(
+      order.channel_id,
+      order.channelId,
+      order.base_channel_code,
+    ),
+    'Awb': getAwbCode(order),
+    'Order Date': sanitizeDate(firstNonEmpty(
+      order.order_date,
+      order.channel_created_at,
+      order.created_at,
+    )),
+    'Created At': sanitizeDate(firstNonEmpty(
+      order.created_at,
+      order.created_on,
+    )),
+    'Customer Name': firstNonEmpty(
+      order.customer_name,
+      order.billing_customer_name,
+      order.billing_name,
+      order.consignee_name,
+      order.customer?.name,
+      order.others?.billing_name,
+    ),
+    'Customer Email': firstNonEmpty(
+      order.customer_email,
+      order.billing_email,
+      order.email,
+      order.customer?.email,
+      order.others?.billing_email,
+    ),
+    'Customer Phone': firstNonEmpty(
+      order.customer_phone,
+      order.billing_phone,
+      order.phone,
+      order.customer_mobile,
+      order.customer?.phone,
+      order.others?.billing_phone,
+      order.others?.billing_phone_number,
+    ),
+    'Pickup Location': firstNonEmpty(
+      order.pickup_location,
+      order.pickup_location_name,
+      order.pickup_address,
+      order.pickup?.location,
+      order.pickup?.address,
+      order.pickup_address_detail?.pickup_code,
+      order.pickup_address_detail?.name,
+    ),
+    'Payment Status': firstNonEmpty(order.payment_status, order.paymentStatus, order.payment?.status),
+    'Payment Method': firstNonEmpty(
+      order.payment_method,
+      order.payment_method_name,
+      order.payment_mode,
+      order.others?.payment_code,
+      stringifyIfObject(order.others?.payment_gateway_names),
+    ),
+    'Order Total': firstNonEmpty(
+      order.total,
+      order.total_amount,
+      order.amount,
+      order.order_total,
+      order.grand_total,
+      order.others?.subtotal_price,
+    ),
+    'Tax': firstNonEmpty(order.tax, order.total_tax, order.tax_amount, order.others?.tax),
+    'Order Status': firstNonEmpty(order.order_status, order.status, order.master_status),
+    'Order Status Code': firstNonEmpty(order.order_status_code, order.status_code),
+    'Shipment ID': getShipmentId(order),
+    'Tracking URL': firstNonEmpty(
+      order.tracking_url,
+      order.track_url,
+      order.trackingUrl,
+      shipment?.tracking_url,
+      shipment?.track_url,
+      order.last_mile_awb_track_url,
+    ),
+    'Delivered Date': sanitizeDate(firstNonEmpty(
+      order.delivered_date,
+      order.delivery_date,
+      order.deliveredDate,
+      shipment?.delivered_date,
+      order.others?.delivered_date,
+    )),
+    'Products': summarizeProducts(order),
+    'Last Local API Sync At': new Date().toISOString(),
+    'Raw Shiprocket JSON': JSON.stringify(order),
+  };
 }
 
 function extractOrders(apiResponse) {
@@ -640,20 +751,58 @@ async function runJob(days) {
   }
 }
 
+const CSV_COLUMNS = [
+  'Shiprocket Unique Key',
+  'Sr Order Id',
+  'Shipment Status Id',
+  'Shipment Status',
+  'Scans 1 Status',
+  'Scans 1 Sr-status-label',
+  'Scans 1 Sr-status',
+  'Scans 1 Location',
+  'Scans 1 Date',
+  'Scans 1 Activity',
+  'Scans 0 Status',
+  'Scans 0 Sr-status-label',
+  'Scans 0 Sr-status',
+  'Scans 0 Location',
+  'Scans 0 Date',
+  'Scans 0 Activity',
+  'Order Id',
+  'Is Return',
+  'Etd',
+  'Current Timestamp',
+  'Current Status Id',
+  'Current Status',
+  'Courier Name',
+  'Channel Id',
+  'Awb',
+  'Order Date',
+  'Created At',
+  'Customer Name',
+  'Customer Email',
+  'Customer Phone',
+  'Pickup Location',
+  'Payment Status',
+  'Payment Method',
+  'Order Total',
+  'Tax',
+  'Order Status',
+  'Order Status Code',
+  'Shipment ID',
+  'Tracking URL',
+  'Delivered Date',
+  'Products',
+  'Last Local API Sync At',
+  'Raw Shiprocket JSON',
+];
+
 async function writeCSV(filepath, master) {
   const records = Object.values(master);
   if (records.length === 0) return;
 
-  const columns = Object.keys(records[0]).map(key => ({
-    id: key,
-    title: key,
-  }));
-
-  const csvWriter = createObjectCsvWriter({
-    path: filepath,
-    header: columns,
-  });
-
+  const header = CSV_COLUMNS.map(key => ({ id: key, title: key }));
+  const csvWriter = createObjectCsvWriter({ path: filepath, header });
   await csvWriter.writeRecords(records);
   console.log(`CSV written: ${filepath} (${records.length} rows)`);
 }

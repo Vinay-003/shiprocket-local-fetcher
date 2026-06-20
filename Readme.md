@@ -132,16 +132,24 @@ output/
 
 ## CSV columns
 
+The CSV uses webhook-compatible column names so the downstream Apps Script webhook upsert can directly update the same columns without maintaining duplicate field names.
+
 ```
-Shiprocket Unique Key      Shiprocket Order ID         Channel Order ID
-Order Date                 Created At                  Customer Name
-Customer Email             Customer Phone              Pickup Location
-Payment Status             Payment Method              Order Total
-Tax                        Order Status                Order Status Code
-Shipment ID                AWB Code                    Courier
-Current Shipment Status    Current Shipment Status ID  Current Shipment Status Time
-Tracking URL               Expected Delivery Date      Delivered Date
-Products                   Last Local API Sync At      Raw Shiprocket JSON
+Shiprocket Unique Key      Sr Order Id                 Shipment Status Id
+Shipment Status            Scans 1 Status              Scans 1 Sr-status-label
+Scans 1 Sr-status          Scans 1 Location            Scans 1 Date
+Scans 1 Activity           Scans 0 Status              Scans 0 Sr-status-label
+Scans 0 Sr-status          Scans 0 Location            Scans 0 Date
+Scans 0 Activity           Order Id                    Is Return
+Etd                        Current Timestamp           Current Status Id
+Current Status             Courier Name                Channel Id
+Awb                        Order Date                  Created At
+Customer Name              Customer Email              Customer Phone
+Pickup Location            Payment Status              Payment Method
+Order Total                Tax                         Order Status
+Order Status Code          Shipment ID                 Tracking URL
+Delivered Date             Products                    Last Local API Sync At
+Raw Shiprocket JSON
 ```
 
 ## API endpoints
