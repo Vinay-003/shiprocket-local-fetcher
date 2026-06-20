@@ -723,7 +723,8 @@ async function runJob(days) {
         hasMore = false;
       } else {
         page++;
-        await sleep(1500);
+        // page delay reduced — 429 backoff already handles rate limits
+        await sleep(500);
       }
     }
 
